@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>BlotMate - Bazar Blot Score Tracker</title>
+  
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    :root {
+      --neon-blue: #00f3ff;
+      --neon-pink: #ff00ea;
+      --bg-dark: #0a0a0f;
+      --panel-dark: #16161e;
+    }
+    body {
+      background-color: var(--bg-dark);
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overscroll-behavior-y: none;
+    }
+    
+    /* Fancy Neon Slider */
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 100%;
+      background: transparent;
+      height: 30px;
+      margin: 10px 0;
+    }
+    input[type=range]:focus {
+      outline: none;
+    }
+    input[type=range]::-webkit-slider-runnable-track {
+      width: 100%;
+      height: 12px;
+      cursor: pointer;
+      background: #2a2a35;
+      border-radius: 10px;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
+    }
+    input[type=range]::-webkit-slider-thumb {
+      height: 34px;
+      width: 34px;
+      border-radius: 50%;
+      background: var(--neon-blue);
+      cursor: pointer;
+      -webkit-appearance: none;
+      margin-top: -11px;
+      box-shadow: 0 0 15px var(--neon-blue);
+      border: 3px solid #fff;
+      transition: transform 0.1s;
+    }
+    input[type=range]::-webkit-slider-thumb:active {
+      transform: scale(1.15);
+    }
+    .slider-pink::-webkit-slider-thumb {
+      background: var(--neon-pink);
+      box-shadow: 0 0 15px var(--neon-pink);
+    }
+    
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: var(--bg-dark);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #333;
+      border-radius: 3px;
+    }
+  </style>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            neonBlue: '#00f3ff',
+            neonPink: '#ff00ea',
+            darkBg: '#0a0a0f',
+            darkPanel: '#16161e',
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    // --- UTILITIES ---
+    const COMBO_VALUES = { terz: 20, fifty: 50, hundred: 100, fourOfAKind: 100, blotReblot: 20 };
+    const MULTIPLIERS = { none: 1, kontra: 2, rekontra: 4 };
+
+    const calculatePoints = (rawScore) => Math.round(rawScore / 10);
+
+    function BlotMate() {
+      // --- STATE ---
+      const [gameState, setGameState] = useState(() => {
+        const saved = localStorage.getItem('blotmate_state');
+        if (saved) return JSON.parse(saved);
+        return {
+          phase: 'setup', // setup, dashboard, round
+          targetScore: 151,
+          dealer: 0,
+          teams: [
+            { id: 0, name: 'Us', total: 0 },
+            { id: 1, name: 'Them', total: 0 }
+          ],
+          history: []
+        };
+      });
+
+      const [roundState, setRoundState] = useState(getInitialRoundState());
+      const [activeTab, setActiveTab] = useState('bid'); // bid, combos, score
+
+      // --- PERSISTENCE ---
+      useEffect(() => {
+        localStorage.setItem('blotmate_state', JSON.stringify(gameState));
+      }, [gameState]);
+
+      function getInitialRoundState() {
+        return {
+          attacker: 0,
+          suit: '♠️',
+          bid: 8,
+          isKaput: false,
+          multiplier: 1,
+          combos: {
+            0: { terz: 0, fifty: 0, hundred: 0, fourOfAKind: 0, blotReblot: 0 },
+            1: { terz: 0, fifty: 0, hundred: 0, fourOfAKind: 0, blotReblot: 0 }
+          },
+          rawScoreA: 81, // Out of 162
+          lastTrick: 0
+        };
+      }
+
+      // --- GAME FLOW LOGIC ---
+      const startNewGame = (target, team1, team2) => {
+        setGameState({
+          phase: 'dashboard',
+          targetScore: target,
+          dealer: 0,
+          teams: [
+            { id: 0, name: team1 || 'Us', total: 0 },
+            { id: 1, name: team2 || 'Them', total: 0 }
+          ],
+          history: []
+        });
+      };
+
+      const revertLastRound = () => {
+        if (gameState.history.length === 0) return;
+        const lastRound = gameState.history[gameState.history.length - 1];
+        setGameState(prev => ({
+          ...prev,
+          teams: prev.teams.map((t, i) => ({ ...t, total: t.total - lastRound.pointsGained[i] })),
+          dealer: (prev.dealer - 1 + 2) % 2,
+          history: prev.history.slice(0, -1)
+        }));
+      };
+
+      const resolveRound = () => {
+        const { attacker, bid, isKaput, multiplier, combos, rawScoreA, lastTrick } = roundState;
+        const defender = attacker === 0 ? 1 : 0;
+        
+        // Calculate combo totals (in native units, e.g., 20 = 2 points in total calculation)
+        const getComboPoints = (teamId) => {
+          let sum = 0;
+          for (const [key, qty] of Object.entries(combos[teamId])) {
+             sum += (COMBO_VALUES[key] / 10) * qty;
+          }
+          return sum;
+        };
+
+        const combosA = getComboPoints(0);
+        const combosB = getComboPoints(1);
+        
+        const rawA = rawScoreA + (lastTrick === 0 ? 10 : 0);
+        const rawB = (162 - rawScoreA) + (lastTrick === 1 ? 10 : 0);
+        
+        const cardsPointsA = calculatePoints(rawA);
+        const cardsPointsB = calculatePoints(rawB);
+
+        const attackerCards = attacker === 0 ? cardsPointsA : cardsPointsB;
+        const defenderCards = attacker === 0 ? cardsPointsB : cardsPointsA;
+        const attackerCombos = attacker === 0 ? combosA : combosB;
+        const defenderCombos = attacker === 0 ? combosB : combosA;
+
+        const totalAttackerPoints = attackerCards + attackerCombos;
+        
+        let finalPoints = [0, 0];
+        let calculationDetails = ["", ""];
+        const isBaite = !isKaput && totalAttackerPoints < bid;
+        const failedKaput = isKaput && rawScoreA !== (attacker === 0 ? 162 : 0);
+
+        if (isBaite || failedKaput) {
+          // Baite / Failed Kaput Logic
+          const penalty = isKaput ? Math.max(bid, 25) : bid;
+          const totalDefenderGain = (penalty + 16 + attackerCombos + defenderCombos) * multiplier;
+          
+          finalPoints[attacker] = 0;
+          finalPoints[defender] = totalDefenderGain;
+          
+          calculationDetails[attacker] = `Baite! 0 pts`;
+          calculationDetails[defender] = `Bid(${penalty}) + Cards(16) + AllCombos(${attackerCombos + defenderCombos}) * X${multiplier} = ${totalDefenderGain}`;
+        } else {
+          // Success Logic
+          const getDetails = (cards, comboTotal) => {
+             let d = `Cards(${cards})`;
+             if (comboTotal > 0) d += ` + Combos(${comboTotal})`;
+             return d + ` = ${cards + comboTotal}`;
+          };
+
+          finalPoints[attacker] = (totalAttackerPoints) * multiplier;
+          finalPoints[defender] = (defenderCards + defenderCombos);
+          
+          calculationDetails[attacker] = getDetails(attackerCards, attackerCombos) + (multiplier > 1 ? ` (X${multiplier})` : '');
+          calculationDetails[defender] = getDetails(defenderCards, defenderCombos);
+        }
+
+        const newHistoryItem = {
+          roundNum: gameState.history.length + 1,
+          bidStr: `${roundState.suit} ${bid}${isKaput ? ' (Kaput)' : ''}`,
+          attacker,
+          pointsGained: finalPoints,
+          details: calculationDetails
+        };
+
+        setGameState(prev => {
+          const newTeams = prev.teams.map((t, i) => ({ ...t, total: t.total + finalPoints[i] }));
+          return {
+            ...prev,
+            phase: 'dashboard',
+            dealer: (prev.dealer + 1) % 2,
+            teams: newTeams,
+            history: [...prev.history, newHistoryItem]
+          };
+        });
+        
+        setRoundState(getInitialRoundState());
+        setActiveTab('bid');
+      };
+
+      // --- RENDERERS ---
+      
+      const renderSetup = () => {
+        const [t1, setT1] = useState('');
+        const [t2, setT2] = useState('');
+        const [target, setTarget] = useState(151);
+
+        return (
+          <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center space-y-8">
+            <h1 className="text-5xl font-black mb-8 tracking-tighter" style={{textShadow: '0 0 20px var(--neon-blue)'}}>
+              BLOT<span className="text-neonPink">MATE</span>
+            </h1>
+            
+            <div className="w-full max-w-sm space-y-4">
+              <input 
+                type="text" placeholder="Team 1 Name" value={t1} onChange={e => setT1(e.target.value)}
+                className="w-full bg-darkPanel text-xl p-4 rounded-2xl border border-gray-800 focus:border-neonBlue focus:outline-none transition-colors"
+              />
+              <input 
+                type="text" placeholder="Team 2 Name" value={t2} onChange={e => setT2(e.target.value)}
+                className="w-full bg-darkPanel text-xl p-4 rounded-2xl border border-gray-800 focus:border-neonPink focus:outline-none transition-colors"
+              />
+            </div>
+
+            <div className="space-y-3 w-full max-w-sm">
+              <p className="text-gray-400 font-bold uppercase tracking-widest text-sm">Target Score</p>
+              <div className="flex gap-4">
+                {[101, 151, 301].map(score => (
+                  <button 
+                    key={score} onClick={() => setTarget(score)}
+                    className={`flex-1 py-4 text-xl font-bold rounded-2xl border-2 transition-all ${target === score ? 'border-neonBlue bg-blue-900/20 text-white' : 'border-gray-800 text-gray-500'}`}
+                  >
+                    {score}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button 
+              onClick={() => startNewGame(target, t1, t2)}
+              className="w-full max-w-sm py-5 rounded-2xl font-black text-2xl bg-gradient-to-r from-neonBlue to-neonPink shadow-[0_0_30px_rgba(0,243,255,0.4)] active:scale-95 transition-transform"
+            >
+              START GAME
+            </button>
+          </div>
+        );
+      };
+
+      const renderDashboard = () => {
+        const { teams, targetScore, dealer, history } = gameState;
+        
+        const isGameOver = teams[0].total >= targetScore || teams[1].total >= targetScore;
+        const winner = teams[0].total > teams[1].total ? teams[0] : teams[1];
+
+        return (
+          <div className="min-h-screen flex flex-col p-4 relative pb-24">
+            {/* Header / Scoreboard */}
+            <div className="flex justify-between items-end bg-darkPanel p-6 rounded-3xl mb-6 shadow-xl border border-gray-800">
+              {teams.map((team, idx) => (
+                <div key={idx} className={`flex flex-col ${idx === 1 ? 'items-end' : 'items-start'} w-1/2`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-gray-400 font-bold text-lg">{team.name}</span>
+                    {dealer === idx && <span className="text-neonBlue text-sm bg-blue-900/30 px-2 py-1 rounded">DEALER</span>}
+                  </div>
+                  <span className={`text-6xl font-black ${idx === 0 ? 'text-neonBlue' : 'text-neonPink'}`}>
+                    {team.total}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="text-center text-gray-500 font-bold tracking-widest mb-4">
+              PLAYING TO {targetScore}
+            </div>
+
+            {/* Match History */}
+            <div className="flex-1 overflow-y-auto space-y-3 pb-8">
+              {history.map((h, i) => (
+                <div key={i} className="bg-darkPanel p-4 rounded-xl text-sm border border-gray-800/50">
+                  <div className="flex justify-between font-bold mb-2">
+                    <span className="text-gray-400">Round {h.roundNum} • {h.bidStr}</span>
+                    <span className="text-white bg-gray-800 px-2 py-0.5 rounded text-xs">Attacker: {teams[h.attacker].name}</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <div className="w-1/2 pr-2">
+                      <span className="text-neonBlue font-bold block mb-1">+{h.pointsGained[0]}</span>
+                      <span className="opacity-70 leading-tight block">{h.details[0]}</span>
+                    </div>
+                    <div className="w-1/2 pl-2 text-right">
+                      <span className="text-neonPink font-bold block mb-1">+{h.pointsGained[1]}</span>
+                      <span className="opacity-70 leading-tight block">{h.details[1]}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Actions */}
+            <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-darkBg via-darkBg to-transparent flex gap-3">
+               <button 
+                onClick={revertLastRound}
+                disabled={history.length === 0 || isGameOver}
+                className="bg-gray-800 p-4 rounded-2xl font-bold disabled:opacity-30 active:scale-95 transition-transform"
+              >
+                ↩ Undo
+              </button>
+              <button 
+                onClick={() => isGameOver ? setGameState(prev => ({...prev, phase: 'setup'})) : setGameState(prev => ({...prev, phase: 'round'}))}
+                className="flex-1 py-4 rounded-2xl font-black text-xl bg-neonBlue text-black shadow-[0_0_20px_rgba(0,243,255,0.4)] active:scale-95 transition-transform"
+              >
+                {isGameOver ? 'NEW GAME' : 'NEW ROUND'}
+              </button>
+            </div>
+            
+            {isGameOver && (
+              <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center z-50 p-6 text-center">
+                <h2 className="text-6xl font-black text-yellow-400 mb-4 animate-bounce">VICTORY!</h2>
+                <p className="text-3xl font-bold mb-8">{winner.name} wins with {winner.total} pts.</p>
+                <button 
+                  onClick={() => setGameState(prev => ({...prev, phase: 'setup'}))}
+                  className="w-full py-5 rounded-2xl font-black text-2xl bg-white text-black active:scale-95"
+                >
+                  RETURN TO HOME
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      const renderRoundModal = () => {
+        const t1 = gameState.teams[0].name;
+        const t2 = gameState.teams[1].name;
+        
+        return (
+          <div className="min-h-screen bg-darkBg flex flex-col absolute inset-0 z-40">
+            {/* Header Tabs */}
+            <div className="flex bg-darkPanel p-2 gap-2 mt-4 mx-4 rounded-2xl">
+              {['bid', 'combos', 'score'].map(tab => (
+                <button 
+                  key={tab} onClick={() => setActiveTab(tab)}
+                  className={`flex-1 py-3 text-sm font-bold uppercase rounded-xl transition-colors ${activeTab === tab ? 'bg-gray-700 text-white shadow-md' : 'text-gray-500'}`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-6">
+              
+              {/* --- TAB: BIDDING --- */}
+              {activeTab === 'bid' && (
+                <div className="space-y-8 animate-fade-in">
+                  <div className="space-y-3">
+                    <label className="text-gray-400 font-bold uppercase text-sm">Who won the bid?</label>
+                    <div className="flex bg-gray-900 rounded-2xl p-1 border border-gray-800">
+                      <button onClick={() => setRoundState(r => ({...r, attacker: 0}))}
+                        className={`flex-1 py-4 text-xl font-bold rounded-xl transition-all ${roundState.attacker === 0 ? 'bg-neonBlue text-black' : 'text-gray-500'}`}>{t1}</button>
+                      <button onClick={() => setRoundState(r => ({...r, attacker: 1}))}
+                        className={`flex-1 py-4 text-xl font-bold rounded-xl transition-all ${roundState.attacker === 1 ? 'bg-neonPink text-black' : 'text-gray-500'}`}>{t2}</button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-gray-400 font-bold uppercase text-sm">Trump Suit</label>
+                    <div className="grid grid-cols-5 gap-2">
+                      {['♠️', '♥️', '♦️', '♣️', 'NT'].map(s => (
+                        <button key={s} onClick={() => setRoundState(r => ({...r, suit: s}))}
+                          className={`py-4 text-2xl rounded-2xl border transition-all ${roundState.suit === s ? 'border-white bg-gray-800' : 'border-gray-800 bg-darkPanel text-opacity-50'}`}>
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3 bg-darkPanel p-6 rounded-3xl border border-gray-800">
+                    <div className="flex justify-between items-end mb-4">
+                      <label className="text-gray-400 font-bold uppercase text-sm">Bid Amount</label>
+                      <div className="flex items-center gap-2">
+                        <input type="checkbox" id="kaput" className="w-5 h-5 accent-neonPink" checked={roundState.isKaput} 
+                          onChange={(e) => setRoundState(r => ({...r, isKaput: e.target.checked, bid: e.target.checked && r.bid < 25 ? 25 : r.bid}))} />
+                        <label htmlFor="kaput" className="font-bold text-neonPink">KAPUT</label>
+                      </div>
+                    </div>
+                    <div className="text-center text-6xl font-black mb-4">
+                      {roundState.bid}
+                    </div>
+                    <input 
+                      type="range" min={roundState.isKaput ? 25 : 8} max="50" step="1" 
+                      value={roundState.bid} 
+                      onChange={(e) => setRoundState(r => ({...r, bid: parseInt(e.target.value)}))}
+                      className={roundState.attacker === 0 ? '' : 'slider-pink'}
+                    />
+                  </div>
+
+                  <div className="flex gap-2">
+                    {['none', 'kontra', 'rekontra'].map(mult => (
+                      <button key={mult} onClick={() => setRoundState(r => ({...r, multiplier: MULTIPLIERS[mult]}))}
+                        className={`flex-1 py-3 font-bold uppercase text-sm rounded-xl border ${roundState.multiplier === MULTIPLIERS[mult] ? 'bg-white text-black' : 'border-gray-800 text-gray-500'}`}>
+                        {mult}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* --- TAB: COMBOS --- */}
+              {activeTab === 'combos' && (
+                <div className="space-y-6 animate-fade-in flex-1">
+                   <div className="flex gap-4">
+                      {/* Team 1 Combos */}
+                      <div className="flex-1 space-y-2">
+                        <div className="text-center text-neonBlue font-bold pb-2">{t1}</div>
+                        {Object.keys(COMBO_VALUES).map(combo => (
+                          <div key={'t0'+combo} className="flex justify-between items-center bg-darkPanel p-3 rounded-xl">
+                            <span className="text-xs font-bold text-gray-400 capitalize">{combo.replace(/([A-Z])/g, ' $1').trim()}</span>
+                            <div className="flex gap-2 items-center">
+                              <button onClick={() => setRoundState(r => ({...r, combos: {...r.combos, 0: {...r.combos[0], [combo]: Math.max(0, r.combos[0][combo] - 1)}}}))}
+                                className="w-8 h-8 bg-gray-800 rounded-full font-bold">-</button>
+                              <span className="w-4 text-center font-bold">{roundState.combos[0][combo]}</span>
+                              <button onClick={() => setRoundState(r => ({...r, combos: {...r.combos, 0: {...r.combos[0], [combo]: r.combos[0][combo] + 1}}}))}
+                                className="w-8 h-8 bg-blue-900 rounded-full font-bold text-neonBlue">+</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Team 2 Combos */}
+                      <div className="flex-1 space-y-2">
+                        <div className="text-center text-neonPink font-bold pb-2">{t2}</div>
+                        {Object.keys(COMBO_VALUES).map(combo => (
+                          <div key={'t1'+combo} className="flex justify-between items-center bg-darkPanel p-3 rounded-xl">
+                            <span className="text-xs font-bold text-gray-400 capitalize">{combo.replace(/([A-Z])/g, ' $1').trim()}</span>
+                            <div className="flex gap-2 items-center">
+                              <button onClick={() => setRoundState(r => ({...r, combos: {...r.combos, 1: {...r.combos[1], [combo]: Math.max(0, r.combos[1][combo] - 1)}}}))}
+                                className="w-8 h-8 bg-gray-800 rounded-full font-bold">-</button>
+                              <span className="w-4 text-center font-bold">{roundState.combos[1][combo]}</span>
+                              <button onClick={() => setRoundState(r => ({...r, combos: {...r.combos, 1: {...r.combos[1], [combo]: r.combos[1][combo] + 1}}}))}
+                                className="w-8 h-8 bg-pink-900 rounded-full font-bold text-neonPink">+</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                   </div>
+                </div>
+              )}
+
+              {/* --- TAB: SCORE --- */}
+              {activeTab === 'score' && (
+                <div className="space-y-8 animate-fade-in flex flex-col justify-center flex-1">
+                  <div className="text-center space-y-1">
+                    <p className="text-gray-400 font-bold tracking-widest text-sm">TOTAL RAW SCORE (162)</p>
+                    <p className="text-xs text-gray-600">Slide to allocate points</p>
+                  </div>
+
+                  <div className="bg-darkPanel p-6 rounded-3xl border border-gray-800 space-y-8 relative overflow-hidden">
+                    <div className="flex justify-between items-end relative z-10">
+                      <div className="text-left">
+                        <div className="text-neonBlue text-sm font-bold mb-1">{t1}</div>
+                        <div className="text-5xl font-black">{roundState.rawScoreA}</div>
+                        <div className="text-gray-400 font-bold mt-2">→ {calculatePoints(roundState.rawScoreA)} pts</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-neonPink text-sm font-bold mb-1">{t2}</div>
+                        <div className="text-5xl font-black">{162 - roundState.rawScoreA}</div>
+                        <div className="text-gray-400 font-bold mt-2">→ {calculatePoints(162 - roundState.rawScoreA)} pts</div>
+                      </div>
+                    </div>
+
+                    <input 
+                      type="range" min="0" max="162" step="1" 
+                      value={roundState.rawScoreA} 
+                      onChange={(e) => setRoundState(r => ({...r, rawScoreA: parseInt(e.target.value)}))}
+                      className="relative z-10 slider-pink"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between bg-darkPanel p-4 rounded-2xl border border-gray-800">
+                    <span className="font-bold text-gray-300">Who took the last trick? (+10 Raw)</span>
+                    <div className="flex bg-gray-900 rounded-xl p-1">
+                       <button onClick={() => setRoundState(r => ({...r, lastTrick: 0}))}
+                        className={`px-4 py-2 text-sm font-bold rounded-lg ${roundState.lastTrick === 0 ? 'bg-neonBlue text-black' : 'text-gray-500'}`}>{t1}</button>
+                       <button onClick={() => setRoundState(r => ({...r, lastTrick: 1}))}
+                        className={`px-4 py-2 text-sm font-bold rounded-lg ${roundState.lastTrick === 1 ? 'bg-neonPink text-black' : 'text-gray-500'}`}>{t2}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+            {/* Footer Actions */}
+            <div className="p-4 flex gap-3 bg-darkBg border-t border-gray-800">
+              <button 
+                onClick={() => setGameState(prev => ({...prev, phase: 'dashboard'}))}
+                className="py-4 px-6 rounded-2xl font-bold bg-gray-800 active:scale-95"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={activeTab === 'score' ? resolveRound : () => setActiveTab(activeTab === 'bid' ? 'combos' : 'score')}
+                className="flex-1 py-4 rounded-2xl font-black text-xl bg-white text-black active:scale-95"
+              >
+                {activeTab === 'score' ? 'SUBMIT ROUND' : 'NEXT STEP'}
+              </button>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="max-w-md mx-auto relative bg-darkBg shadow-2xl overflow-hidden min-h-screen">
+          {gameState.phase === 'setup' && renderSetup()}
+          {gameState.phase === 'dashboard' && renderDashboard()}
+          {gameState.phase === 'round' && renderRoundModal()}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<BlotMate />);
+  </script>
+</body>
+</html>
